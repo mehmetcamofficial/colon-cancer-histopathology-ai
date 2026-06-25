@@ -1,6 +1,7 @@
 import html as html_escape
 import textwrap
 import time
+from datetime import datetime
 
 import requests
 import streamlit as st
@@ -11,6 +12,12 @@ from model import (
     predict,
     create_gradcam_overlay,
     create_attention_box_overlay,
+)
+
+from feedback_store import (
+    save_feedback_sample,
+    feedback_csv_exists,
+    read_feedback_csv_bytes,
 )
 
 
@@ -56,8 +63,8 @@ Bir histopatoloji görüntü sınıflandırma demosu için kısa, güvenli ve pr
 Model çıktısı:
 - Tahmin: {result["label"]}
 - Güven: {result["confidence"] * 100:.2f}%
-- Kanser olasılığı: {result["cancer_probability"] * 100:.2f}%
-- Normal olasılığı: {result["normal_probability"] * 100:.2f}%
+- Kanser-benzeri doku olasılığı: {result["cancer_probability"] * 100:.2f}%
+- Normal/benign-benzeri doku olasılığı: {result["normal_probability"] * 100:.2f}%
 
 Kurallar:
 - Klinik teşhis koyma.
@@ -65,11 +72,11 @@ Kurallar:
 - Sonucun sadece araştırma/eğitim demosu olduğunu açıkça belirt.
 - Grad-CAM/attention bölgesinin kesin tümör sınırı olmadığını söyle.
 - Panik yaratmayan, dikkatli ve anlaşılır bir dil kullan.
-- 4 bölüm yaz:
-  1. Kısa özet
-  2. Model çıktısının yorumu
-  3. Güvenlik ve sınırlamalar
-  4. Önerilen sonraki adım
+- Aşağıdaki 4 başlıkla yaz:
+  1. Kısa Özet
+  2. Model Çıktısının Yorumu
+  3. Güvenlik ve Sınırlamalar
+  4. Önerilen Sonraki Adım
 - Türkçe yaz.
 """
     else:
@@ -79,8 +86,8 @@ Create a short, safe, and professional AI interpretation report for a histopatho
 Model output:
 - Prediction: {result["label"]}
 - Confidence: {result["confidence"] * 100:.2f}%
-- Cancer probability: {result["cancer_probability"] * 100:.2f}%
-- Normal probability: {result["normal_probability"] * 100:.2f}%
+- Cancer-like tissue probability: {result["cancer_probability"] * 100:.2f}%
+- Normal/benign-like tissue probability: {result["normal_probability"] * 100:.2f}%
 
 Rules:
 - Do not provide a clinical diagnosis.
@@ -88,11 +95,11 @@ Rules:
 - Clearly state that this is a research/educational demo only.
 - Explain that Grad-CAM/attention regions are not confirmed tumor boundaries.
 - Use calm, careful, and understandable language.
-- Write 4 sections:
-  1. Brief summary
-  2. Interpretation of model output
-  3. Safety and limitations
-  4. Suggested next step
+- Write with these 4 headings:
+  1. Brief Summary
+  2. Interpretation of Model Output
+  3. Safety and Limitations
+  4. Suggested Next Step
 - Write in English.
 """
 
@@ -113,7 +120,7 @@ Rules:
             },
         ],
         "temperature": 0.2,
-        "max_tokens": 800,
+        "max_tokens": 900,
     }
 
     headers = {
@@ -140,6 +147,45 @@ Rules:
 
     except Exception as e:
         return None, str(e)
+
+
+def make_report_download_text(item, report):
+    result = item["result"]
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""OncoConnect AI - Colon Histopathology Research Demo Report
+Generated at: {created_at}
+File: {item["filename"]}
+
+MODEL OUTPUT
+Prediction: {result["label"]}
+Confidence: {result["confidence"] * 100:.2f}%
+Cancer-like probability: {result["cancer_probability"] * 100:.2f}%
+Normal-like probability: {result["normal_probability"] * 100:.2f}%
+
+AI INTERPRETATION REPORT
+{report}
+
+IMPORTANT DISCLAIMER
+This report is for research and educational demonstration only. It is not intended for clinical diagnosis, treatment planning, or medical decision-making. Final evaluation must always be performed by qualified pathology specialists.
+"""
+
+
+def probability_bar(label, value, color="#38bdf8"):
+    pct = max(0, min(100, value * 100))
+    html_block(
+        f"""
+        <div class="prob-wrap">
+        <div class="prob-head">
+        <span>{label}</span>
+        <strong>{pct:.2f}%</strong>
+        </div>
+        <div class="prob-track">
+        <div class="prob-fill" style="width: {pct:.2f}%; background: {color};"></div>
+        </div>
+        </div>
+        """
+    )
 
 
 model, device = cached_model()
@@ -169,6 +215,20 @@ with st.sidebar:
     st.link_button("🌐 OncoConnect Website", ONCOCONNECT_URL, use_container_width=True)
     st.link_button("💻 GitHub Repository", GITHUB_URL, use_container_width=True)
 
+    st.divider()
+
+    if feedback_csv_exists():
+        feedback_bytes = read_feedback_csv_bytes()
+
+        if feedback_bytes:
+            st.download_button(
+                label="⬇️ Download feedback dataset",
+                data=feedback_bytes,
+                file_name="oncoconnect_feedback_dataset.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
 
 is_tr = lang == "Türkçe"
 is_dark = theme == "Dark"
@@ -176,103 +236,123 @@ is_dark = theme == "Dark"
 
 if is_tr:
     T = {
-        "badge": "OncoConnect AI Araştırma Prototipi",
-        "title": "Kolon Kanseri Histopatoloji AI",
-        "subtitle": "EfficientNet-B0 tabanlı bu demo, histopatoloji görüntülerinde kolon adenokarsinom dokusu ile benign/normal kolon dokusunu ayırt etmek için geliştirilmiş bir yapay zekâ araştırma prototipidir.",
-        "upload_title": "Histopatoloji görüntüsü yükle",
-        "upload_desc": "Bir veya birden fazla JPG, JPEG ya da PNG formatında kolon doku görüntüsü yükle. Model, sen analiz butonuna bastıktan sonra çalışır.",
+        "badge": "Araştırma prototipi",
+        "title": "Kolon Histopatoloji AI Analiz Paneli",
+        "subtitle": "EfficientNet-B0, Grad-CAM, OpenRouter o4-mini ve insan denetimli feedback toplama desteğiyle kolon histopatoloji görüntü sınıflandırma demosu.",
+        "upload_title": "1. Görüntüleri yükle",
+        "upload_desc": "Bir veya birden fazla JPG, JPEG ya da PNG kolon doku görüntüsü yükle. Model yalnızca analiz butonuna bastığında çalışır.",
         "upload_label": "Görüntü yükle",
-        "ready": "görüntü yüklendi. AI analizi için hazır.",
-        "start_analysis": "AI Analizi Başlat",
-        "performance_title": "Model performansı",
-        "performance_desc": "EfficientNet-B0 modeli, ResNet18 baseline modeline göre test ayrımında false negative sayısını düşürdüğü için ana model olarak seçildi.",
+        "ready": "görüntü yüklendi. Analiz için hazır.",
+        "start_analysis": "AI Analizini Başlat",
+        "performance_title": "Model kartı",
+        "performance_desc": "Bu demo, kolon adenokarsinom-benzeri doku ile benign/normal-benzeri kolon dokusunu ayırt eden bir araştırma prototipidir.",
         "accuracy": "Test doğruluğu",
         "recall": "Kanser recall",
         "fn": "False negative",
         "prediction_result": "Tahmin sonucu",
-        "cancer_result": "KANSER / Adenokarsinom benzeri doku",
-        "normal_result": "NORMAL / Benign benzeri doku",
+        "cancer_result": "KANSER-BENZERİ DOKU ÖRÜNTÜSÜ",
+        "normal_result": "NORMAL / BENIGN-BENZERİ DOKU ÖRÜNTÜSÜ",
         "confidence": "Güven",
-        "cancer_prob": "Kanser olasılığı",
-        "normal_prob": "Normal olasılığı",
+        "cancer_prob": "Kanser-benzeri olasılık",
+        "normal_prob": "Normal-benzeri olasılık",
         "curves": "Eğitim grafikleri",
         "curves_desc": "EfficientNet-B0 eğitim sürecinden accuracy, cancer recall ve loss grafikleri.",
         "limitation_title": "Önemli sınırlama",
         "limitation_desc": "LC25000 veri seti artırılmış görüntüler içerir. Bu nedenle test sonuçları gerçek klinik performans olarak yorumlanmamalıdır. Gerçek klinik kullanım için harici doğrulama, uzman değerlendirmesi, regülasyon incelemesi ve farklı cihazlar/boyama protokolleri üzerinde test gerekir.",
         "disclaimer": "Bu uygulama yalnızca araştırma ve eğitim demosudur. Klinik teşhis, tedavi planlama veya tıbbi karar verme amacıyla kullanılmaz. Nihai değerlendirme her zaman uzman patologlar tarafından yapılmalıdır.",
-        "analysis_waiting": "Analiz için görüntü yükle",
-        "analysis_waiting_desc": "Görüntü yüklendikten sonra AI Analizi Başlat butonuna bas. Model sınıf olasılığı, güven skoru, Grad-CAM açıklama haritası ve yaklaşık dikkat kutusu üretir.",
-        "uploaded_caption": "Yüklenen histopatoloji görüntüsü",
-        "analysis_results": "Analiz sonuçları",
+        "analysis_waiting": "Analiz için görüntü bekleniyor",
+        "analysis_waiting_desc": "Görüntü yüklendikten sonra AI Analizini Başlat butonuna bas. Model sınıf olasılığı, güven skoru, Grad-CAM açıklama haritası ve yaklaşık dikkat kutusu üretir.",
+        "analysis_results": "3. Analiz sonuçları",
         "analysis_results_desc": "Her görüntü için tahmin, olasılıklar, Grad-CAM heatmap ve yaklaşık dikkat kutusu aşağıda gösterilir.",
-        "step_1": "Görüntüler hazırlanıyor",
-        "step_2": "EfficientNet-B0 çalışıyor",
-        "step_3": "Grad-CAM üretiliyor",
-        "step_4": "Sonuçlar hazırlanıyor",
+        "step_1": "Upload",
+        "step_2": "Analyze",
+        "step_3": "Review",
+        "step_1_desc": "Doku görüntüleri yüklenir",
+        "step_2_desc": "EfficientNet-B0 ve Grad-CAM çalışır",
+        "step_3_desc": "Sonuçlar, rapor ve feedback incelenir",
         "website": "Canlı Website",
         "github": "GitHub Repo",
         "footer": "Mehmet Cam tarafından geliştirildi · OncoConnect AI · Araştırma prototipi",
-        "explain_title": "AI tarafından öne çıkarılan bölge",
+        "explain_title": "Model attention map",
         "explain_desc": "Bu Grad-CAM görselleştirmesi, modelin tahmine katkı veren bölgelerini gösterir. Bu bir klinik tümör sınırı veya kesin patoloji işaretlemesi değildir.",
-        "original": "Orijinal görüntü",
-        "heatmap": "Grad-CAM heatmap",
-        "box": "Yaklaşık dikkat kutusu",
+        "original": "Orijinal",
+        "heatmap": "Grad-CAM",
+        "box": "Attention zone",
         "box_note": "Kırmızı kutu, model aktivasyonunun yoğun olduğu yaklaşık alanı gösterir. Klinik sınır/segmentasyon değildir.",
         "ai_report_title": "AI yorum raporu",
         "ai_report_desc": "OpenRouter o4-mini, model çıktısını güvenli ve tıbbi olmayan bir açıklamaya dönüştürür.",
         "ai_report_button": "AI Raporu Oluştur",
         "ai_report_warning": "Bu metin OpenRouter o4-mini ile üretilmiştir. Tıbbi tavsiye veya klinik teşhis olarak değerlendirilmemelidir.",
-        "no_image": "Henüz görüntü yüklenmedi.",
+        "download_report": "Raporu TXT indir",
+        "queue": "Analiz kuyruğu",
+        "queue_desc": "Yüklenen görüntüler analiz için sıraya alındı.",
+        "feedback_title": "Bu araştırma modelini geliştirmeye yardımcı ol",
+        "feedback_desc": "Bu feedback, gelecekte insan denetimli inceleme ve kontrollü yeniden eğitim için aday veri olarak kaydedilir. Model bu yüklemeden otomatik öğrenmez.",
+        "feedback_question": "Model tahmini faydalı mıydı?",
+        "feedback_label": "Opsiyonel etiket / uzman etiketi",
+        "feedback_notes": "Opsiyonel not",
+        "feedback_button": "Gelecekteki retraining için feedback kaydet",
+        "feedback_success": "Feedback kaydedildi. Aday örnek ID:",
     }
 else:
     T = {
-        "badge": "OncoConnect AI Research Prototype",
-        "title": "Colon Cancer Histopathology AI",
-        "subtitle": "An EfficientNet-B0 based research demo designed to distinguish colon adenocarcinoma tissue from benign colon tissue using histopathology images.",
-        "upload_title": "Upload histopathology images",
-        "upload_desc": "Upload one or more JPG, JPEG, or PNG colon tissue images. The model will run only after you click the analysis button.",
+        "badge": "Research prototype",
+        "title": "Colon Histopathology AI Analysis Console",
+        "subtitle": "A Streamlit research demo powered by EfficientNet-B0, Grad-CAM explainability, OpenRouter o4-mini reporting, and human-in-the-loop feedback collection.",
+        "upload_title": "1. Upload images",
+        "upload_desc": "Upload one or more JPG, JPEG, or PNG colon tissue images. The model runs only after you click the analysis button.",
         "upload_label": "Upload image",
-        "ready": "image(s) uploaded. Ready for AI analysis.",
+        "ready": "image(s) uploaded. Ready for analysis.",
         "start_analysis": "Start AI Analysis",
-        "performance_title": "Model performance",
-        "performance_desc": "The EfficientNet-B0 model was selected as the main model because it reduced false negatives compared with the ResNet18 baseline on the test split.",
+        "performance_title": "Model card",
+        "performance_desc": "This demo classifies colon adenocarcinoma-like tissue patterns versus benign/normal-like colon tissue patterns.",
         "accuracy": "Test accuracy",
         "recall": "Cancer recall",
         "fn": "False negatives",
         "prediction_result": "Prediction result",
-        "cancer_result": "CANCER / Adenocarcinoma-like tissue",
-        "normal_result": "NORMAL / Benign-like tissue",
+        "cancer_result": "CANCER-LIKE TISSUE PATTERN",
+        "normal_result": "NORMAL / BENIGN-LIKE TISSUE PATTERN",
         "confidence": "Confidence",
-        "cancer_prob": "Cancer probability",
-        "normal_prob": "Normal probability",
+        "cancer_prob": "Cancer-like probability",
+        "normal_prob": "Normal-like probability",
         "curves": "Training curves",
         "curves_desc": "Accuracy, cancer recall, and loss curves from the EfficientNet-B0 training run.",
         "limitation_title": "Important limitation",
         "limitation_desc": "The LC25000 dataset contains augmented images. Therefore, the reported test results should not be interpreted as real-world clinical performance. Real clinical deployment would require external validation, expert review, regulatory evaluation, and testing across different scanners, staining protocols, and patient populations.",
         "disclaimer": "This application is for research and educational demonstration only. It is not intended for clinical diagnosis, treatment planning, or medical decision-making. Final evaluation must always be performed by qualified pathology specialists.",
-        "analysis_waiting": "Upload images to start analysis",
+        "analysis_waiting": "Waiting for images",
         "analysis_waiting_desc": "After uploading images, click Start AI Analysis. The model will produce class probabilities, confidence score, Grad-CAM explanation, and approximate attention box.",
-        "uploaded_caption": "Uploaded histopathology image",
-        "analysis_results": "Analysis results",
+        "analysis_results": "3. Analysis results",
         "analysis_results_desc": "Review prediction, probabilities, Grad-CAM heatmap, and approximate attention box for each analyzed image.",
-        "step_1": "Preparing images",
-        "step_2": "Running EfficientNet-B0",
-        "step_3": "Generating Grad-CAM",
-        "step_4": "Finalizing results",
+        "step_1": "Upload",
+        "step_2": "Analyze",
+        "step_3": "Review",
+        "step_1_desc": "Upload tissue images",
+        "step_2_desc": "Run EfficientNet-B0 + Grad-CAM",
+        "step_3_desc": "Review results, report, and feedback",
         "website": "Live Website",
         "github": "GitHub Repo",
         "footer": "Built by Mehmet Cam · OncoConnect AI · Research prototype",
-        "explain_title": "AI-highlighted region",
+        "explain_title": "Model attention map",
         "explain_desc": "This Grad-CAM visualization shows the regions that contributed most to the model prediction. It is not a clinical tumor boundary or confirmed pathology annotation.",
-        "original": "Original image",
-        "heatmap": "Grad-CAM heatmap",
-        "box": "Approximate attention box",
+        "original": "Original",
+        "heatmap": "Grad-CAM",
+        "box": "Attention zone",
         "box_note": "The red box approximates the most activated model-attention region. It is not a clinical segmentation boundary.",
         "ai_report_title": "AI interpretation report",
         "ai_report_desc": "OpenRouter o4-mini turns the model output into a safe, non-diagnostic explanation.",
         "ai_report_button": "Generate AI Report",
         "ai_report_warning": "This text is generated by OpenRouter o4-mini. It should not be treated as medical advice or a clinical diagnosis.",
-        "no_image": "No image uploaded yet.",
+        "download_report": "Download TXT report",
+        "queue": "Analysis queue",
+        "queue_desc": "Uploaded images are queued for manual analysis.",
+        "feedback_title": "Help improve this research model",
+        "feedback_desc": "Your feedback will be saved as candidate data for future human review and controlled retraining. The model does not learn automatically from this upload.",
+        "feedback_question": "Was the model prediction useful?",
+        "feedback_label": "Optional label / expert label",
+        "feedback_notes": "Optional notes",
+        "feedback_button": "Submit feedback for future retraining",
+        "feedback_success": "Feedback saved. Candidate sample ID:",
     }
 
 
@@ -306,7 +386,7 @@ else:
     soft_card = "rgba(248, 250, 252, 0.95)"
     upload_bg = "#f8fafc"
     disclaimer_text = "#7c2d12"
-    report_bg = "rgba(255, 255, 255, 0.92)"
+    report_bg = "rgba(255, 255, 255, 0.94)"
     report_text = "#111827"
 
 
@@ -318,7 +398,7 @@ html_block(
     }}
 
     .main .block-container {{
-        padding-top: 1.6rem;
+        padding-top: 1.2rem;
         padding-bottom: 3rem;
         max-width: 1320px;
     }}
@@ -328,28 +408,16 @@ html_block(
     }}
 
     .hero-card {{
-        padding: 2.35rem;
-        border-radius: 30px;
+        padding: 1.55rem;
+        border-radius: 26px;
         background:
-            linear-gradient(135deg, rgba(15, 23, 42, 0.97) 0%, rgba(30, 58, 138, 0.96) 54%, rgba(15, 118, 110, 0.96) 100%);
+            linear-gradient(135deg, rgba(15, 23, 42, 0.97) 0%, rgba(30, 58, 138, 0.96) 56%, rgba(15, 118, 110, 0.96) 100%);
         color: white;
-        box-shadow: 0 28px 80px rgba(2, 6, 23, 0.38);
-        margin-bottom: 1.2rem;
+        box-shadow: 0 24px 70px rgba(2, 6, 23, 0.34);
+        margin-bottom: 1rem;
         border: 1px solid rgba(255, 255, 255, 0.14);
         overflow: hidden;
         position: relative;
-    }}
-
-    .hero-card:before {{
-        content: "";
-        position: absolute;
-        width: 360px;
-        height: 360px;
-        border-radius: 999px;
-        right: -120px;
-        top: -140px;
-        background: rgba(45, 212, 191, 0.20);
-        filter: blur(4px);
     }}
 
     .topbar {{
@@ -357,91 +425,81 @@ html_block(
         justify-content: space-between;
         gap: 1rem;
         align-items: center;
-        margin-bottom: 1.2rem;
+        margin-bottom: 0.8rem;
         position: relative;
         z-index: 1;
     }}
 
     .brand {{
         display: flex;
-        gap: 0.75rem;
+        gap: 0.7rem;
         align-items: center;
         font-weight: 950;
         letter-spacing: -0.03em;
-        font-size: 1.05rem;
+        font-size: 1rem;
     }}
 
     .logo-mark {{
-        width: 44px;
-        height: 44px;
-        border-radius: 15px;
+        width: 40px;
+        height: 40px;
+        border-radius: 14px;
         display: grid;
         place-items: center;
         background: linear-gradient(135deg, #60a5fa, #2dd4bf);
         box-shadow: 0 12px 30px rgba(45, 212, 191, 0.28);
-        font-size: 1.35rem;
+        font-size: 1.25rem;
     }}
 
     .mode-pill {{
-        padding: 0.58rem 0.92rem;
+        padding: 0.52rem 0.86rem;
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.14);
         border: 1px solid rgba(255, 255, 255, 0.24);
         color: rgba(255, 255, 255, 0.94);
-        font-size: 0.88rem;
+        font-size: 0.84rem;
         font-weight: 850;
     }}
 
     .hero-badge {{
         display: inline-flex;
         align-items: center;
-        gap: 8px;
-        padding: 0.44rem 0.8rem;
+        padding: 0.34rem 0.68rem;
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.14);
         border: 1px solid rgba(255, 255, 255, 0.22);
-        font-size: 0.86rem;
+        font-size: 0.78rem;
         font-weight: 850;
-        letter-spacing: 0.02em;
-        margin-bottom: 1rem;
-        position: relative;
-        z-index: 1;
+        margin-bottom: 0.6rem;
     }}
 
     .hero-title {{
-        font-size: 3.05rem;
-        line-height: 1.04;
+        font-size: 2.15rem;
+        line-height: 1.08;
         font-weight: 950;
-        margin: 0 0 1rem 0;
-        letter-spacing: -0.06em;
-        position: relative;
-        z-index: 1;
+        margin: 0 0 0.55rem 0;
+        letter-spacing: -0.055em;
     }}
 
     .hero-subtitle {{
-        font-size: 1.08rem;
-        line-height: 1.75;
+        font-size: 0.98rem;
+        line-height: 1.65;
         color: rgba(255, 255, 255, 0.87);
-        max-width: 860px;
-        margin-bottom: 1.25rem;
-        position: relative;
-        z-index: 1;
+        max-width: 900px;
+        margin-bottom: 0.8rem;
     }}
 
     .hero-actions {{
         display: flex;
-        gap: 0.8rem;
+        gap: 0.7rem;
         flex-wrap: wrap;
-        margin: 1.3rem 0 0.6rem 0;
-        position: relative;
-        z-index: 1;
+        margin: 0.9rem 0 0.45rem 0;
     }}
 
     .action-button {{
         display: inline-flex;
         align-items: center;
         gap: 0.45rem;
-        padding: 0.74rem 1rem;
+        padding: 0.62rem 0.88rem;
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.95);
         color: #0f172a !important;
@@ -458,24 +516,57 @@ html_block(
     .hero-meta {{
         display: flex;
         flex-wrap: wrap;
-        gap: 0.75rem;
-        margin-top: 1.25rem;
-        position: relative;
-        z-index: 1;
+        gap: 0.55rem;
+        margin-top: 0.85rem;
     }}
 
     .meta-pill {{
-        padding: 0.62rem 0.9rem;
+        padding: 0.48rem 0.72rem;
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.12);
         border: 1px solid rgba(255, 255, 255, 0.20);
-        font-size: 0.9rem;
+        font-size: 0.82rem;
         color: rgba(255, 255, 255, 0.92);
         font-weight: 700;
     }}
 
+    .stepper {{
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.8rem;
+        margin-bottom: 1rem;
+    }}
+
+    .stepper-card {{
+        padding: 1rem;
+        border-radius: 22px;
+        background: {card_bg};
+        border: 1px solid {card_border};
+        box-shadow: 0 18px 48px rgba(2, 6, 23, 0.10);
+    }}
+
+    .stepper-num {{
+        color: #38bdf8;
+        font-weight: 950;
+        font-size: 0.88rem;
+        margin-bottom: 0.2rem;
+    }}
+
+    .stepper-title {{
+        color: {text_main};
+        font-weight: 950;
+        font-size: 1.06rem;
+        margin-bottom: 0.25rem;
+    }}
+
+    .stepper-desc {{
+        color: {text_muted};
+        font-size: 0.88rem;
+        line-height: 1.55;
+    }}
+
     .glass-card {{
-        padding: 1.35rem;
+        padding: 1.25rem;
         border-radius: 24px;
         background: {card_bg};
         border: 1px solid {card_border};
@@ -486,8 +577,8 @@ html_block(
     }}
 
     .section-title {{
-        font-size: 1.28rem;
-        font-weight: 900;
+        font-size: 1.22rem;
+        font-weight: 950;
         color: {text_main};
         margin-bottom: 0.55rem;
         letter-spacing: -0.035em;
@@ -496,18 +587,18 @@ html_block(
     .muted {{
         color: {text_muted};
         line-height: 1.7;
-        font-size: 0.98rem;
+        font-size: 0.96rem;
     }}
 
     .metric-grid {{
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.85rem;
+        gap: 0.75rem;
         margin-top: 1rem;
     }}
 
     .metric-card {{
-        padding: 1rem;
+        padding: 0.95rem;
         border-radius: 18px;
         background: {soft_card};
         border: 1px solid {card_border};
@@ -515,7 +606,7 @@ html_block(
 
     .metric-label {{
         color: {text_muted};
-        font-size: 0.78rem;
+        font-size: 0.76rem;
         font-weight: 850;
         text-transform: uppercase;
         letter-spacing: 0.065em;
@@ -524,39 +615,36 @@ html_block(
 
     .metric-value {{
         color: {text_main};
-        font-size: 1.62rem;
+        font-size: 1.45rem;
         font-weight: 950;
         letter-spacing: -0.05em;
     }}
 
-    .analysis-steps {{
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 0.65rem;
-        margin-top: 1rem;
-    }}
-
-    .step {{
-        padding: 0.85rem;
+    .queue-item {{
+        padding: 0.8rem 0.9rem;
         border-radius: 16px;
         background: {soft_card};
         border: 1px solid {card_border};
+        margin-bottom: 0.55rem;
+        color: {text_main};
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: center;
     }}
 
-    .step-number {{
+    .queue-badge {{
+        padding: 0.28rem 0.62rem;
+        border-radius: 999px;
+        background: rgba(56, 189, 248, 0.16);
         color: #38bdf8;
-        font-weight: 950;
-        margin-bottom: 0.2rem;
-    }}
-
-    .step-text {{
-        color: {text_muted};
-        font-size: 0.84rem;
-        font-weight: 700;
+        font-weight: 850;
+        font-size: 0.78rem;
+        white-space: nowrap;
     }}
 
     .prediction-card-cancer {{
-        padding: 1.35rem;
+        padding: 1.2rem;
         border-radius: 22px;
         background: linear-gradient(135deg, #991b1b 0%, #ef4444 100%);
         color: white;
@@ -566,7 +654,7 @@ html_block(
     }}
 
     .prediction-card-normal {{
-        padding: 1.35rem;
+        padding: 1.2rem;
         border-radius: 22px;
         background: linear-gradient(135deg, #047857 0%, #10b981 100%);
         color: white;
@@ -576,7 +664,7 @@ html_block(
     }}
 
     .prediction-label {{
-        font-size: 0.82rem;
+        font-size: 0.78rem;
         text-transform: uppercase;
         letter-spacing: 0.08em;
         opacity: 0.88;
@@ -584,7 +672,7 @@ html_block(
     }}
 
     .prediction-main {{
-        font-size: 1.8rem;
+        font-size: 1.45rem;
         font-weight: 950;
         letter-spacing: -0.045em;
         margin-top: 0.15rem;
@@ -592,31 +680,55 @@ html_block(
 
     .prediction-confidence {{
         margin-top: 0.3rem;
-        font-size: 1.05rem;
+        font-size: 1rem;
         opacity: 0.93;
         font-weight: 700;
     }}
 
+    .prob-wrap {{
+        margin: 0.85rem 0;
+    }}
+
+    .prob-head {{
+        display: flex;
+        justify-content: space-between;
+        color: {text_main};
+        font-size: 0.92rem;
+        margin-bottom: 0.38rem;
+    }}
+
+    .prob-track {{
+        width: 100%;
+        height: 12px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.22);
+        overflow: hidden;
+    }}
+
+    .prob-fill {{
+        height: 12px;
+        border-radius: 999px;
+    }}
+
     .disclaimer {{
-        padding: 1rem 1.1rem;
+        padding: 0.95rem 1rem;
         border-radius: 18px;
         background: rgba(251, 146, 60, 0.13);
         border: 1px solid rgba(251, 146, 60, 0.45);
         color: {disclaimer_text};
         line-height: 1.65;
-        margin-top: 1rem;
-        margin-bottom: 1.2rem;
+        margin-bottom: 1rem;
         font-weight: 650;
     }}
 
     .report-card {{
-        padding: 1.35rem;
-        border-radius: 24px;
+        padding: 1.25rem;
+        border-radius: 22px;
         background: {report_bg};
         border: 1px solid {card_border};
         color: {report_text} !important;
         line-height: 1.85;
-        font-size: 1rem;
+        font-size: 0.98rem;
         margin-top: 1rem;
         margin-bottom: 1rem;
         white-space: pre-wrap;
@@ -666,12 +778,14 @@ html_block(
 
     @media (max-width: 768px) {{
         .hero-title {{
-            font-size: 2.15rem;
+            font-size: 1.85rem;
         }}
+
         .metric-grid,
-        .analysis-steps {{
+        .stepper {{
             grid-template-columns: 1fr;
         }}
+
         .topbar {{
             align-items: flex-start;
             flex-direction: column;
@@ -700,10 +814,11 @@ html_block(
     <a class="action-button secondary" href="{GITHUB_URL}" target="_blank">💻 {T["github"]}</a>
     </div>
     <div class="hero-meta">
-    <div class="meta-pill">Model: EfficientNet-B0</div>
-    <div class="meta-pill">AI Report: OpenRouter o4-mini</div>
-    <div class="meta-pill">Explainability: Grad-CAM</div>
-    <div class="meta-pill">Framework: PyTorch + Streamlit</div>
+    <div class="meta-pill">EfficientNet-B0</div>
+    <div class="meta-pill">Grad-CAM</div>
+    <div class="meta-pill">OpenRouter o4-mini</div>
+    <div class="meta-pill">Human-in-the-loop feedback</div>
+    <div class="meta-pill">PyTorch + Streamlit</div>
     </div>
     </div>
     """
@@ -714,6 +829,29 @@ html_block(
     f"""
     <div class="disclaimer">
     <strong>Medical disclaimer:</strong> {T["disclaimer"]}
+    </div>
+    """
+)
+
+
+html_block(
+    f"""
+    <div class="stepper">
+    <div class="stepper-card">
+    <div class="stepper-num">01</div>
+    <div class="stepper-title">{T["step_1"]}</div>
+    <div class="stepper-desc">{T["step_1_desc"]}</div>
+    </div>
+    <div class="stepper-card">
+    <div class="stepper-num">02</div>
+    <div class="stepper-title">{T["step_2"]}</div>
+    <div class="stepper-desc">{T["step_2_desc"]}</div>
+    </div>
+    <div class="stepper-card">
+    <div class="stepper-num">03</div>
+    <div class="stepper-title">{T["step_3"]}</div>
+    <div class="stepper-desc">{T["step_3_desc"]}</div>
+    </div>
     </div>
     """
 )
@@ -742,6 +880,25 @@ with left:
     if uploaded_files:
         st.success(f"{len(uploaded_files)} {T['ready']}")
 
+        html_block(
+            f"""
+            <div class="glass-card">
+            <div class="section-title">{T["queue"]}</div>
+            <div class="muted">{T["queue_desc"]}</div>
+            </div>
+            """
+        )
+
+        for idx, uploaded_file in enumerate(uploaded_files):
+            html_block(
+                f"""
+                <div class="queue-item">
+                <span>{idx + 1}. {uploaded_file.name}</span>
+                <span class="queue-badge">Ready</span>
+                </div>
+                """
+            )
+
         preview_count = min(len(uploaded_files), 3)
         preview_cols = st.columns(preview_count)
 
@@ -755,18 +912,6 @@ with left:
                     use_container_width=True,
                 )
 
-        html_block(
-            f"""
-            <div class="glass-card">
-            <div class="section-title">AI analysis control</div>
-            <div class="muted">
-            Images are uploaded but the model has not run yet. Click the button below to start classification,
-            Grad-CAM explanation, attention box generation, and optional OpenRouter AI reporting.
-            </div>
-            </div>
-            """
-        )
-
         run_analysis = st.button(
             T["start_analysis"],
             type="primary",
@@ -779,17 +924,10 @@ with left:
             progress = st.progress(0)
             status_box = st.empty()
 
-            steps = [
-                T["step_1"],
-                T["step_2"],
-                T["step_3"],
-                T["step_4"],
-            ]
-
             status_box.markdown(
-                f"""
+                """
                 <div class="analysis-status">
-                Step 1/4 · {steps[0]}
+                Step 1/4 · Preparing uploaded images...
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -804,7 +942,7 @@ with left:
                 status_box.markdown(
                     f"""
                     <div class="analysis-status">
-                    Step 2/4 · {steps[1]} · Image {file_index + 1}/{len(uploaded_files)}
+                    Step 2/4 · Running EfficientNet-B0 · Image {file_index + 1}/{len(uploaded_files)}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -817,7 +955,7 @@ with left:
                 status_box.markdown(
                     f"""
                     <div class="analysis-status">
-                    Step 3/4 · {steps[2]} · Image {file_index + 1}/{len(uploaded_files)}
+                    Step 3/4 · Generating Grad-CAM · Image {file_index + 1}/{len(uploaded_files)}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -850,9 +988,9 @@ with left:
                 )
 
             status_box.markdown(
-                f"""
+                """
                 <div class="analysis-status">
-                Step 4/4 · {steps[3]} · Analysis completed.
+                Step 4/4 · Analysis completed. Results are ready.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -868,24 +1006,6 @@ with left:
             <div class="glass-card">
             <div class="section-title">{T["analysis_waiting"]}</div>
             <div class="muted">{T["analysis_waiting_desc"]}</div>
-            <div class="analysis-steps">
-            <div class="step">
-            <div class="step-number">01</div>
-            <div class="step-text">{T["step_1"]}</div>
-            </div>
-            <div class="step">
-            <div class="step-number">02</div>
-            <div class="step-text">{T["step_2"]}</div>
-            </div>
-            <div class="step">
-            <div class="step-number">03</div>
-            <div class="step-text">{T["step_3"]}</div>
-            </div>
-            <div class="step">
-            <div class="step-number">04</div>
-            <div class="step-text">{T["step_4"]}</div>
-            </div>
-            </div>
             </div>
             """
         )
@@ -930,15 +1050,22 @@ with left:
                         """
                     )
 
-                p1, p2 = st.columns(2)
+                metric_cols = st.columns(4)
 
-                with p1:
+                with metric_cols[0]:
+                    st.metric("Prediction", result["label"])
+
+                with metric_cols[1]:
+                    st.metric(T["confidence"], f"{result['confidence'] * 100:.2f}%")
+
+                with metric_cols[2]:
                     st.metric(T["cancer_prob"], f"{result['cancer_probability'] * 100:.2f}%")
 
-                with p2:
+                with metric_cols[3]:
                     st.metric(T["normal_prob"], f"{result['normal_probability'] * 100:.2f}%")
 
-                st.progress(result["confidence"])
+                probability_bar(T["cancer_prob"], result["cancer_probability"], "#ef4444")
+                probability_bar(T["normal_prob"], result["normal_probability"], "#10b981")
 
                 html_block(
                     f"""
@@ -952,25 +1079,13 @@ with left:
                 g1, g2, g3 = st.columns(3)
 
                 with g1:
-                    st.image(
-                        image,
-                        caption=T["original"],
-                        use_container_width=True,
-                    )
+                    st.image(image, caption=T["original"], use_container_width=True)
 
                 with g2:
-                    st.image(
-                        overlay_image,
-                        caption=T["heatmap"],
-                        use_container_width=True,
-                    )
+                    st.image(overlay_image, caption=T["heatmap"], use_container_width=True)
 
                 with g3:
-                    st.image(
-                        boxed_image,
-                        caption=T["box"],
-                        use_container_width=True,
-                    )
+                    st.image(boxed_image, caption=T["box"], use_container_width=True)
 
                 html_block(
                     f"""
@@ -979,6 +1094,61 @@ with left:
                     </div>
                     """
                 )
+
+                html_block(
+                    f"""
+                    <div class="glass-card">
+                    <div class="section-title">{T["feedback_title"]}</div>
+                    <div class="muted">{T["feedback_desc"]}</div>
+                    </div>
+                    """
+                )
+
+                feedback_key = f"user_feedback_{idx}"
+                label_key = f"user_label_{idx}"
+                notes_key = f"user_notes_{idx}"
+                submit_key = f"submit_feedback_{idx}"
+
+                user_feedback = st.radio(
+                    T["feedback_question"],
+                    ["Correct", "Incorrect", "Unsure"],
+                    horizontal=True,
+                    key=feedback_key,
+                )
+
+                user_label = st.selectbox(
+                    T["feedback_label"],
+                    [
+                        "not_sure",
+                        "cancer_like",
+                        "normal_like",
+                        "not_histopathology",
+                    ],
+                    key=label_key,
+                )
+
+                notes = st.text_area(
+                    T["feedback_notes"],
+                    placeholder="Example: image quality is low, unsure about label, needs expert review...",
+                    key=notes_key,
+                )
+
+                if st.button(
+                    T["feedback_button"],
+                    type="secondary",
+                    use_container_width=True,
+                    key=submit_key,
+                ):
+                    saved_row = save_feedback_sample(
+                        image=image,
+                        original_filename=item["filename"],
+                        result=result,
+                        user_feedback=user_feedback,
+                        user_label=user_label,
+                        notes=notes,
+                    )
+
+                    st.success(f"{T['feedback_success']} {saved_row['image_id']}")
 
                 html_block(
                     f"""
@@ -1053,12 +1223,26 @@ with left:
                     )
 
                     safe_report = html_escape.escape(st.session_state[report_key])
+
                     html_block(
                         f"""
                         <div class="report-card">
                         {safe_report}
                         </div>
                         """
+                    )
+
+                    report_text = make_report_download_text(
+                        item=item,
+                        report=st.session_state[report_key],
+                    )
+
+                    st.download_button(
+                        label=T["download_report"],
+                        data=report_text,
+                        file_name=f"oncoconnect_ai_report_{idx + 1}.txt",
+                        mime="text/plain",
+                        use_container_width=True,
                     )
 
 
@@ -1081,6 +1265,25 @@ with right:
         <div class="metric-label">{T["fn"]}</div>
         <div class="metric-value">0</div>
         </div>
+        </div>
+        </div>
+        """
+    )
+
+    html_block(
+        """
+        <div class="glass-card">
+        <div class="section-title">Technical model card</div>
+        <div class="muted">
+        <strong>Architecture:</strong> EfficientNet-B0<br>
+        <strong>Dataset:</strong> LC25000 colon subset<br>
+        <strong>Task:</strong> Binary classification<br>
+        <strong>Input:</strong> Histopathology image<br>
+        <strong>Output:</strong> cancer-like / normal-like<br>
+        <strong>Explainability:</strong> Grad-CAM<br>
+        <strong>AI report:</strong> OpenRouter o4-mini<br>
+        <strong>Feedback:</strong> Human-in-the-loop candidate data<br>
+        <strong>Clinical use:</strong> Not approved
         </div>
         </div>
         """
